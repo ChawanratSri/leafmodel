@@ -34,41 +34,88 @@ st.title("ระบบการวิเคราะห์โรคจากใ�
 st.header("(Preliminary Durian Leaf Disease Analysis System)")
 
 # ============== Helper: แสดงภาพแบบปลอดภัย ==============
-def show_rgb(img_any, caption=None):
+def show_rgb(img_any, caption=None, debug=False):
     """
     แสดงภาพให้ปลอดภัยกับ Streamlit: บังคับ dtype/shape เป็น RGB uint8
-    รองรับทั้ง numpy array และ PIL.Image
+    - จัดการกรณี float/int อื่น → clip→uint8
+    - กรอง NaN/Inf → 0
+    - บังคับ C-contiguous
+    - รองรับ NDIM=2 (gray), NDIM=3 กับ 3/4 ช่อง
+    - ล้มเหลว → fallback เป็น PIL.Image แล้วค่อยแสดง
     """
+    import numpy as np, cv2
     from PIL import Image
-    import numpy as np, cv2 as _cv2
 
-    # PIL → แสดงได้เลย
-    if isinstance(img_any, Image.Image):
-        st.image(img_any, caption=caption, use_container_width=True)
-        return
+    try:
+        # PIL → แสดงได้เลย (แต่อยากชัวร์ว่าคือ RGB)
+        if isinstance(img_any, Image.Image):
+            if img_any.mode not in ("RGB", "RGBA", "L"):
+                img_any = img_any.convert("RGB")
+            elif img_any.mode == "RGBA":
+                img_any = img_any.convert("RGB")
+            st.image(img_any, caption=caption, use_container_width=True)
+            return
 
-    # แปลงเป็น ndarray
-    arr = np.array(img_any)
+        # แปลงเป็น ndarray
+        arr = np.array(img_any)
 
-    # หากเป็น float/ints อื่น → clip แล้วแปลงเป็น uint8
-    if arr.dtype != np.uint8:
-        arr = np.clip(arr, 0, 255).astype(np.uint8)
+        # กรอง NaN/Inf
+        if np.issubdtype(arr.dtype, np.floating):
+            arr = np.nan_to_num(arr, nan=0.0, posinf=255.0, neginf=0.0)
 
-    # แปลงเป็น RGB 3 ช่อง
-    if arr.ndim == 2:
-        # grayscale → RGB
-        arr = _cv2.cvtColor(arr, _cv2.COLOR_GRAY2RGB)
-    elif arr.ndim == 3:
-        if arr.shape[2] == 4:
-            # RGBA → RGB
-            arr = arr[:, :, :3]
-        elif arr.shape[2] == 3:
-            pass
+        # clip→uint8
+        if arr.dtype != np.uint8:
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+
+        # NDIM check
+        if arr.ndim == 2:
+            # gray → RGB
+            arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2RGB)
+        elif arr.ndim == 3:
+            ch = arr.shape[2]
+            if ch == 4:
+                # RGBA → RGB
+                arr = arr[:, :, :3]
+            elif ch == 3:
+                pass  # ถือว่าเป็น RGB แล้ว
+            else:
+                # ช่องสีไม่ปกติ → พยายามตัดให้เหลือ 3 ช่อง
+                if ch > 3:
+                    arr = arr[:, :, :3]
+                else:
+                    arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2RGB)
         else:
-            # ช่องสีไม่ปกติ → พยายามบังคับเป็น 3 ช่อง
-            arr = arr[:, :, :3] if arr.shape[2] > 3 else _cv2.cvtColor(arr, _cv2.COLOR_GRAY2RGB)
+            # รูปร่างไม่ปกติ → แปลงผ่าน PIL แล้วแสดง
+            pil = Image.fromarray(arr)
+            if pil.mode != "RGB":
+                pil = pil.convert("RGB")
+            st.image(pil, caption=caption, use_container_width=True)
+            return
 
-    st.image(arr, caption=caption, use_container_width=True)
+        # บังคับ contiguous memory
+        arr = np.ascontiguousarray(arr)
+
+        if debug:
+            st.write({
+                "dtype": str(arr.dtype),
+                "shape": arr.shape,
+                "contiguous": arr.flags["C_CONTIGUOUS"]
+            })
+
+        st.image(arr, caption=caption, use_container_width=True)
+
+    except Exception as e:
+        # Fallback สุดท้าย: แปลงผ่าน PIL แล้วแสดง พร้อมข้อความเตือน (ถ้า debug)
+        try:
+            from PIL import Image
+            pil = Image.fromarray(arr) if 'arr' in locals() else Image.fromarray(np.array(img_any))
+            if pil.mode != "RGB":
+                pil = pil.convert("RGB")
+            if debug:
+                st.warning(f"show_rgb fallback via PIL: {e}")
+            st.image(pil, caption=caption, use_container_width=True)
+        except Exception as e2:
+            st.error(f"ไม่สามารถแสดงภาพได้: {e2}")
 
 # ============== ค่าคงที่ภาพ ==============
 TARGET_W, TARGET_H = 1750, 800
@@ -83,9 +130,14 @@ def resize_contain_pad(img: Image.Image, target_w: int, target_h: int, bg=(0,0,0
     return canvas
 
 def to_analysis_rgb(pil_img: Image.Image) -> np.ndarray:
+    # แก้ EXIF orientation ก่อน
+    pil_img = ImageOps.exif_transpose(pil_img)
     img_r = resize_contain_pad(pil_img, TARGET_W, TARGET_H)
     arr = np.array(img_r)  # RGB
-    return arr[BORDER:TARGET_H-BORDER, BORDER:TARGET_W-BORDER, :]
+    # ป้องกันกรณี BORDER ใหญ่กว่ารูป (ไม่ควรเกิด แต่เผื่อไว้)
+    h, w = arr.shape[:2]
+    b = min(BORDER, h//2 - 1, w//2 - 1) if h > 2 and w > 2 else 0
+    return arr[b:TARGET_H-b, b:TARGET_W-b, :]
 
 # ============== ตัวกรองเงาวาว ==============
 def remove_specular(arr_rgb: np.ndarray, v_thr: int, s_max: int, l_thr: int) -> np.ndarray:
@@ -357,7 +409,7 @@ def run_rules_mode():
         return
 
     for up in files:
-        img  = Image.open(up).convert("RGB")
+        img  = ImageOps.exif_transpose(Image.open(up).convert("RGB"))
         area = remove_specular(to_analysis_rgb(img), v_thr, s_max, l_thr)
 
         # 1) ตรวจใบไหม้ก่อน (priority สูงกว่า) — เงื่อนไข bbox ภายใน [min,max]
@@ -408,13 +460,13 @@ def run_deep_mode():
             return
         X, y = [], []
         for up in healthy_files:
-            arr = remove_specular(to_analysis_rgb(Image.open(up).convert("RGB")), v_thr, s_max, l_thr)
+            arr = remove_specular(to_analysis_rgb(ImageOps.exif_transpose(Image.open(up).convert("RGB"))), v_thr, s_max, l_thr)
             X.append(deep_feature(arr, backbone)); y.append(0)
         for up in spot_files:
-            arr = remove_specular(to_analysis_rgb(Image.open(up).convert("RGB")), v_thr, s_max, l_thr)
+            arr = remove_specular(to_analysis_rgb(ImageOps.exif_transpose(Image.open(up).convert("RGB"))), v_thr, s_max, l_thr)
             X.append(deep_feature(arr, backbone)); y.append(1)
         for up in blight_files:
-            arr = remove_specular(to_analysis_rgb(Image.open(up).convert("RGB")), v_thr, s_max, l_thr)
+            arr = remove_specular(to_analysis_rgb(ImageOps.exif_transpose(Image.open(up).convert("RGB"))), v_thr, s_max, l_thr)
             X.append(deep_feature(arr, backbone)); y.append(2)
 
         X = np.array(X); y = np.array(y)
@@ -442,7 +494,7 @@ def run_deep_mode():
     }
 
     for up in test_files:
-        arr  = remove_specular(to_analysis_rgb(Image.open(up).convert("RGB")), v_thr, s_max, l_thr)
+        arr  = remove_specular(to_analysis_rgb(ImageOps.exif_transpose(Image.open(up).convert("RGB"))), v_thr, s_max, l_thr)
         feat = deep_feature(arr, backbone)
         prob = clf.predict_proba([feat])[0]
         yhat = int(np.argmax(prob))
