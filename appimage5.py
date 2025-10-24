@@ -4,7 +4,7 @@ Durian Leaf Disease (Rules + Deep) — รีไฟน์กฎสี/ขนา�
 - UPDATED: ใบไหม้บังคับกรอบภายใน [100, 250] px 
 - NEW: ขยายช่วงสีใบจุด (ส้ม–เหลือง–น้ำตาลสว่าง), ลด S ขั้นต่ำ, green ring test,
        เงื่อนไขจำนวนจุด ≥ N และ "การกระจาย" ของจุด (spread) ทั้งภาพ
-- FIX: เพิ่ม show_rgb() และใช้แทน st.image() ทุกจุด เพื่อหลีกเลี่ยง dtype/shape issues บน Cloud
+- FIX: show_rgb() ใช้ st_image_safe() เพื่อรองรับ Streamlit เวอร์ชันที่ไม่มี use_container_width
 """
 
 import numpy as np
@@ -33,6 +33,16 @@ h3 { font-size: 18px !important; color: rgb(170,29,18) !important; }
 st.title("ระบบการวิเคราะห์โรคจากใบทุเรียนเบื้องต้น 🌿")
 st.header("(Preliminary Durian Leaf Disease Analysis System)")
 
+# ============== ตัวช่วยแสดงภาพ รองรับทั้งเวอร์ชันเก่า/ใหม่ ==============
+def st_image_safe(img, caption=None, debug=False):
+    """แสดงภาพด้วย Streamlit โดยรองรับทั้ง use_container_width (ใหม่) และ use_column_width (เก่า)."""
+    try:
+        # เวอร์ชันใหม่ (ค่อนข้างใหม่)
+        st.image(img, caption=caption, use_container_width=True)
+    except TypeError:
+        # เวอร์ชันเก่า
+        st.image(img, caption=caption, use_column_width=True)
+
 # ============== Helper: แสดงภาพแบบปลอดภัย ==============
 def show_rgb(img_any, caption=None, debug=False):
     """
@@ -53,7 +63,7 @@ def show_rgb(img_any, caption=None, debug=False):
                 img_any = img_any.convert("RGB")
             elif img_any.mode == "RGBA":
                 img_any = img_any.convert("RGB")
-            st.image(img_any, caption=caption, use_container_width=True)
+            st_image_safe(img_any, caption=caption, debug=debug)
             return
 
         # แปลงเป็น ndarray
@@ -89,7 +99,7 @@ def show_rgb(img_any, caption=None, debug=False):
             pil = Image.fromarray(arr)
             if pil.mode != "RGB":
                 pil = pil.convert("RGB")
-            st.image(pil, caption=caption, use_container_width=True)
+            st_image_safe(pil, caption=caption, debug=debug)
             return
 
         # บังคับ contiguous memory
@@ -102,7 +112,7 @@ def show_rgb(img_any, caption=None, debug=False):
                 "contiguous": arr.flags["C_CONTIGUOUS"]
             })
 
-        st.image(arr, caption=caption, use_container_width=True)
+        st_image_safe(arr, caption=caption, debug=debug)
 
     except Exception as e:
         # Fallback สุดท้าย: แปลงผ่าน PIL แล้วแสดง พร้อมข้อความเตือน (ถ้า debug)
@@ -113,7 +123,7 @@ def show_rgb(img_any, caption=None, debug=False):
                 pil = pil.convert("RGB")
             if debug:
                 st.warning(f"show_rgb fallback via PIL: {e}")
-            st.image(pil, caption=caption, use_container_width=True)
+            st_image_safe(pil, caption=caption, debug=debug)
         except Exception as e2:
             st.error(f"ไม่สามารถแสดงภาพได้: {e2}")
 
@@ -178,10 +188,10 @@ def green_mask(arr_rgb, h_min=35, h_max=85, s_min=35, v_min=35):  # UPDATED: s_m
 # ============== Rules: ใบจุด (HSV/Lab) ==============
 def rules_spot_mask(arr_rgb: np.ndarray,
                     hue_min:int, hue_max:int, a_min:int, b_min:int,
-                    s_min:int, v_min:int,                       # NEW: S/V ปรับได้จาก UI
+                    s_min:int, v_min:int,
                     spot_min_area:int, spot_max_area:int,
                     green_ring_ratio:float=0.55, ring_px:int=5,
-                    spread_min_px:int=120):                     # NEW: เกณฑ์ "การกระจาย"
+                    spread_min_px:int=120):
     """
     เลือก 'ใบจุด' = จุดเล็กสี เหลือง–ส้ม–น้ำตาลสว่าง
     - ขยาย H ให้ครอบส้ม/เหลือง/น้ำตาลสว่าง
@@ -200,10 +210,10 @@ def rules_spot_mask(arr_rgb: np.ndarray,
     B = lab[:,:,2].astype(np.int16) - 128
 
     # ===== สี "เหลือง–ส้ม–น้ำตาลสว่าง" =====
-    H_MIN_SPOT = hue_min         # แนะนำ 10
-    H_MAX_SPOT = hue_max         # แนะนำ 35
-    S_MIN_SPOT = s_min           # NEW
-    V_MIN_SPOT = v_min           # NEW
+    H_MIN_SPOT = hue_min
+    H_MAX_SPOT = hue_max
+    S_MIN_SPOT = s_min
+    V_MIN_SPOT = v_min
     A_MIN_SPOT = a_min
     B_MIN_SPOT = b_min
 
@@ -226,7 +236,7 @@ def rules_spot_mask(arr_rgb: np.ndarray,
     gmask = green_mask(arr_rgb)
     keep = np.zeros_like(mask)
     filtered_stats = []
-    kept_centers = []  # NEW: เก็บ centroid ที่ผ่านทั้งหมด
+    kept_centers = []
     for i in range(1, n):
         x,y,w,h,area = stats[i,0], stats[i,1], stats[i,2], stats[i,3], stats[i, cv2.CC_STAT_AREA]
         if not (spot_min_area <= area <= spot_max_area):
@@ -249,20 +259,18 @@ def rules_spot_mask(arr_rgb: np.ndarray,
             keep[labels == i] = 255
             filtered_stats.append(stats[i])
             cx, cy = centroids[i]
-            kept_centers.append((float(cx), float(cy)))  # NEW
+            kept_centers.append((float(cx), float(cy)))
 
-    # ----- NEW: เช็ก "การกระจาย" ของจุด (spread) -----
+    # ----- เช็ก "การกระจาย" ของจุด (spread) -----
     spread_ok = True
     if len(kept_centers) >= 2:
         xs = np.array([c[0] for c in kept_centers], dtype=np.float32)
         ys = np.array([c[1] for c in kept_centers], dtype=np.float32)
-        # ใช้ std ของแกนที่มากกว่าเป็นตัวแทนการกระจาย
         spread_value = max(xs.std(), ys.std())
         spread_ok = (spread_value >= float(spread_min_px))
-    # หากจุดน้อยกว่า 2 ให้ถือว่า spread ผ่านอัตโนมัติ
 
     viz = cv2.dilate(keep, k3, iterations=1)
-    return keep, viz, filtered_stats, spread_ok  # UPDATED: คืน spread_ok
+    return keep, viz, filtered_stats, spread_ok
 
 # ============== Rules: ใบไหม้ (เหลือง/น้ำตาล/เทา) ==============
 def rules_blight_mask(arr_rgb: np.ndarray,
@@ -374,17 +382,17 @@ with st.sidebar:
     l_thr = st.slider("Lab: L* ≥", 0, 100, 88, 1)
 
     st.subheader("Rules — Leaf-spot (จุดเล็ก)")
-    hue_min = st.slider("Hue min (°)", 0, 180, 10, 1)     # UPDATED: 10
-    hue_max = st.slider("Hue max (°)", 0, 180, 35, 1)     # UPDATED: 35
-    a_min   = st.slider("a* min", -128, 127, 10, 1)       # UPDATED: 10
-    b_min   = st.slider("b* min", -128, 127, 22, 1)       # UPDATED: 22
-    s_min_spot = st.slider("S min (spot)", 0, 255, 30, 1) # NEW: ลด S ขั้นต่ำ
-    v_min_spot = st.slider("V min (spot)", 0, 255, 140, 1)# NEW: ปรับ V ขั้นต่ำ
+    hue_min = st.slider("Hue min (°)", 0, 180, 10, 1)
+    hue_max = st.slider("Hue max (°)", 0, 180, 35, 1)
+    a_min   = st.slider("a* min", -128, 127, 10, 1)
+    b_min   = st.slider("b* min", -128, 127, 22, 1)
+    s_min_spot = st.slider("S min (spot)", 0, 255, 30, 1)
+    v_min_spot = st.slider("V min (spot)", 0, 255, 140, 1)
     spot_min_area = st.number_input("พื้นที่จุดต่ำสุด (px)", 1, 200, 25, 1)
-    spot_max_area = st.number_input("พื้นที่จุดสูงสุด (px)", 5, 2000, 400, 1)  # ~30x30 คือ 900
+    spot_max_area = st.number_input("พื้นที่จุดสูงสุด (px)", 5, 2000, 400, 1)
     count_thr     = st.slider("จำนวนจุดขั้นต่ำ", 0, 500, 8, 1)
-    green_ratio   = st.slider("สัดส่วนสีเขียวล้อมจุด (ring%)", 0.0, 1.0, 0.50, 0.05)  # UPDATED: 50%
-    spread_min_px = st.slider("เกณฑ์กระจาย (std px)", 0, 400, 120, 5)                 # NEW
+    green_ratio   = st.slider("สัดส่วนสีเขียวล้อมจุด (ring%)", 0.0, 1.0, 0.50, 0.05)
+    spread_min_px = st.slider("เกณฑ์กระจาย (std px)", 0, 400, 120, 5)
 
     st.subheader("Rules — Leaf-blight (ก้อนใหญ่)")
     blight_min_bbox = st.number_input("ความกว้าง/สูงกรอบขั้นต่ำ (px)", 10, 2000, 100, 1)
@@ -423,13 +431,13 @@ def run_rules_mode():
         # 2) ตรวจใบจุด
         m_s, m_viz, stats_list, spread_ok = rules_spot_mask(
             area, hue_min, hue_max, a_min, b_min,
-            int(s_min_spot), int(v_min_spot),            # NEW
+            int(s_min_spot), int(v_min_spot),
             int(spot_min_area), int(spot_max_area),
             green_ring_ratio=float(green_ratio), ring_px=5,
-            spread_min_px=int(spread_min_px)             # NEW
+            spread_min_px=int(spread_min_px)
         )
         n_spots = len(stats_list)
-        if (n_spots >= int(count_thr)) and spread_ok:     # UPDATED: ต้อง "หลายจุด" และ "กระจาย"
+        if (n_spots >= int(count_thr)) and spread_ok:
             vis = draw_red_circles(area, m_viz)
             st.markdown(f"**{up.name}** → ⚠️ ต้นทุเรียนเป็นโรคใบจุด (Leaf spot disease)")
             show_rgb(vis)
