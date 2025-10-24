@@ -1,0 +1,2 @@
+[server]
+maxUploadSize = 200   # MB ต่อไฟล์ที่อัปโหลด
