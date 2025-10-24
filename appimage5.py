@@ -4,6 +4,7 @@ Durian Leaf Disease (Rules + Deep) — รีไฟน์กฎสี/ขนา�
 - UPDATED: ใบไหม้บังคับกรอบภายใน [100, 250] px 
 - NEW: ขยายช่วงสีใบจุด (ส้ม–เหลือง–น้ำตาลสว่าง), ลด S ขั้นต่ำ, green ring test,
        เงื่อนไขจำนวนจุด ≥ N และ "การกระจาย" ของจุด (spread) ทั้งภาพ
+- FIX: เพิ่ม show_rgb() และใช้แทน st.image() ทุกจุด เพื่อหลีกเลี่ยง dtype/shape issues บน Cloud
 """
 
 import numpy as np
@@ -32,9 +33,46 @@ h3 { font-size: 18px !important; color: rgb(170,29,18) !important; }
 st.title("ระบบการวิเคราะห์โรคจากใบทุเรียนเบื้องต้น 🌿")
 st.header("(Preliminary Durian Leaf Disease Analysis System)")
 
+# ============== Helper: แสดงภาพแบบปลอดภัย ==============
+def show_rgb(img_any, caption=None):
+    """
+    แสดงภาพให้ปลอดภัยกับ Streamlit: บังคับ dtype/shape เป็น RGB uint8
+    รองรับทั้ง numpy array และ PIL.Image
+    """
+    from PIL import Image
+    import numpy as np, cv2 as _cv2
+
+    # PIL → แสดงได้เลย
+    if isinstance(img_any, Image.Image):
+        st.image(img_any, caption=caption, use_container_width=True)
+        return
+
+    # แปลงเป็น ndarray
+    arr = np.array(img_any)
+
+    # หากเป็น float/ints อื่น → clip แล้วแปลงเป็น uint8
+    if arr.dtype != np.uint8:
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+
+    # แปลงเป็น RGB 3 ช่อง
+    if arr.ndim == 2:
+        # grayscale → RGB
+        arr = _cv2.cvtColor(arr, _cv2.COLOR_GRAY2RGB)
+    elif arr.ndim == 3:
+        if arr.shape[2] == 4:
+            # RGBA → RGB
+            arr = arr[:, :, :3]
+        elif arr.shape[2] == 3:
+            pass
+        else:
+            # ช่องสีไม่ปกติ → พยายามบังคับเป็น 3 ช่อง
+            arr = arr[:, :, :3] if arr.shape[2] > 3 else _cv2.cvtColor(arr, _cv2.COLOR_GRAY2RGB)
+
+    st.image(arr, caption=caption, use_container_width=True)
+
 # ============== ค่าคงที่ภาพ ==============
 TARGET_W, TARGET_H = 1750, 800
-BORDER = 30  # ตัดขอบ 50px ทุกด้าน
+BORDER = 30  # ตัดขอบ 30px ทุกด้าน
 
 def resize_contain_pad(img: Image.Image, target_w: int, target_h: int, bg=(0,0,0)) -> Image.Image:
     contained = ImageOps.contain(img, (target_w, target_h), Image.Resampling.LANCZOS)
@@ -112,10 +150,10 @@ def rules_spot_mask(arr_rgb: np.ndarray,
     # ===== สี "เหลือง–ส้ม–น้ำตาลสว่าง" =====
     H_MIN_SPOT = hue_min         # แนะนำ 10
     H_MAX_SPOT = hue_max         # แนะนำ 35
-    S_MIN_SPOT = s_min           # NEW: เดิม 35 → ปรับได้ (เช่น 25–45)
-    V_MIN_SPOT = v_min           # NEW: เดิม 150 → ปรับได้ (เช่น 120–255)
-    A_MIN_SPOT = a_min           # a* บวกเล็กน้อย
-    B_MIN_SPOT = b_min           # b* บวก (อมเหลือง)
+    S_MIN_SPOT = s_min           # NEW
+    V_MIN_SPOT = v_min           # NEW
+    A_MIN_SPOT = a_min
+    B_MIN_SPOT = b_min
 
     # ---- รวมเกณฑ์สี ----
     mask_h   = (H >= H_MIN_SPOT) & (H <= H_MAX_SPOT)
@@ -166,10 +204,10 @@ def rules_spot_mask(arr_rgb: np.ndarray,
     if len(kept_centers) >= 2:
         xs = np.array([c[0] for c in kept_centers], dtype=np.float32)
         ys = np.array([c[1] for c in kept_centers], dtype=np.float32)
-        # ใช้ std ของแกนที่มากกว่าเป็นตัวแทนการกระจาย (ยืดหยุ่นและไวต่อการเกาะเป็นแถบ)
+        # ใช้ std ของแกนที่มากกว่าเป็นตัวแทนการกระจาย
         spread_value = max(xs.std(), ys.std())
         spread_ok = (spread_value >= float(spread_min_px))
-    # หากจุดน้อยกว่า 2 ให้ถือว่า spread ผ่านอัตโนมัติ (ไปตัดสินด้วยจำนวนจุดขั้นต่ำแทน)
+    # หากจุดน้อยกว่า 2 ให้ถือว่า spread ผ่านอัตโนมัติ
 
     viz = cv2.dilate(keep, k3, iterations=1)
     return keep, viz, filtered_stats, spread_ok  # UPDATED: คืน spread_ok
@@ -226,13 +264,13 @@ def draw_red_circles(arr_rgb: np.ndarray, mask255: np.ndarray) -> np.ndarray:
         if cnt.shape[0] < 5: continue
         (x,y), r = cv2.minEnclosingCircle(cnt)
         if r < 1: continue
-        cv2.circle(out, (int(x), int(y)), int(r)+3, (255,0,0), 2)
+        cv2.circle(out, (int(x), int(y)), int(r)+3, (255,0,0), 2)  # หมายเหตุ: OpenCV ใช้ BGR
     return out
 
 def draw_orange_boxes(arr_rgb: np.ndarray, bboxes) -> np.ndarray:
     out = arr_rgb.copy()
     for (x,y,w,h) in bboxes:
-        cv2.rectangle(out, (x,y), (x+w, y+h), (255,165,0), 3)
+        cv2.rectangle(out, (x,y), (x+w, y+h), (255,165,0), 3)     # BGR
     return out
 
 # ============== Deep (ตัวเลือก) ==============
@@ -327,7 +365,7 @@ def run_rules_mode():
         if np.any(m_b):
             vis = draw_orange_boxes(area, boxes)
             st.markdown(f"**{up.name}** → ⚠️ ต้นทุเรียนเป็นโรคใบไหม้ (Leaf blight disease)")
-            st.image(vis, use_container_width=True)
+            show_rgb(vis)
             continue
 
         # 2) ตรวจใบจุด
@@ -342,16 +380,16 @@ def run_rules_mode():
         if (n_spots >= int(count_thr)) and spread_ok:     # UPDATED: ต้อง "หลายจุด" และ "กระจาย"
             vis = draw_red_circles(area, m_viz)
             st.markdown(f"**{up.name}** → ⚠️ ต้นทุเรียนเป็นโรคใบจุด (Leaf spot disease)")
-            st.image(vis, use_container_width=True)
+            show_rgb(vis)
             continue
 
         # 3) Healthy guard
         if has_large_brown_cluster(area, int(healthy_brown_min_bbox)):
             st.markdown(f"**{up.name}** → ⚠️ พบกลุ่มสีน้ำตาลขนาดเกิน {healthy_brown_min_bbox}×{healthy_brown_min_bbox} px (สงสัยเป็นโรคใบ)")
-            st.image(area, use_container_width=True)
+            show_rgb(area)
         else:
             st.markdown(f"**{up.name}** → ✅ ต้นทุเรียนมีคุณภาพดี (Good quality)")
-            st.image(area, use_container_width=True)
+            show_rgb(area)
 
 # ============== โหมด Deep (ตัวเลือก) ==============
 def run_deep_mode():
@@ -425,7 +463,7 @@ def run_deep_mode():
             if np.any(m_s): vis = draw_red_circles(arr, m_viz)
 
         st.markdown(f"**{up.name}** → {label_map[yhat]}")
-        st.image(vis, use_container_width=True)
+        show_rgb(vis)
 
 # ============== Main ==============
 if mode.startswith("Rules"):
